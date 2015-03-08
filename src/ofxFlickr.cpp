@@ -575,7 +575,7 @@ namespace ofxFlickr {
         {
 
             // prepare session
-            HTTPClientSession session( api_base );
+            HTTPSClientSession session( api_base );
             HTTPRequest req(HTTPRequest::HTTP_POST, "/services/upload/", HTTPMessage::HTTP_1_0);
             req.setContentType("multipart/form-data");
 

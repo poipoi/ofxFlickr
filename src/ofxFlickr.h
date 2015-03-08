@@ -15,6 +15,7 @@
 // Poco stuff
 #include "Poco/Net/HTMLForm.h"
 #include "Poco/Net/HTTPClientSession.h"
+#include "Poco/Net/HTTPSClientSession.h"
 #include "Poco/Net/HTTPRequest.h"
 #include "Poco/Net/HTTPResponse.h"
 #include "Poco/Net/HTTPStreamFactory.h"
