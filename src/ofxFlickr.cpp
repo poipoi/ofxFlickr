@@ -170,7 +170,7 @@ namespace ofxFlickr {
         map<string,string> params;
         params["api_key"]   = api_key;
         if ( text != "" )       params["text"]          = text;
-        if ( user_id != "" )    params["user_id"]       = text;
+        if ( user_id != "" )    params["user_id"]       = user_id;
 
         params["sort"]              = getSortString( sort );
         params["privacy_filter"]    = getPrivacyString( privacy );
@@ -234,16 +234,23 @@ namespace ofxFlickr {
     
 #pragma mark ofxFlickr::API
 
+#define AUTH_CHARANGE_LIMIT     (60)
+    
     //--------------------------------------------------------------
     API::API() :
-    bAuthenticated(false),
-    currentPerms(FLICKR_NONE)
+    currentPerms(FLICKR_NONE),
+    state(BEFORE_AUTH),
+    authCharangedCount(0),
+    settingFilePath("./")
     {
 
     };
 
     //--------------------------------------------------------------
     void API::start(){
+        state = BEFORE_AUTH;
+        authCharangedCount = 0;
+        
         startThread();
     }
     
@@ -252,14 +259,17 @@ namespace ofxFlickr {
         stopThread();
     }
     
+    
     //--------------------------------------------------------------
-    bool API::authenticate( string _api_key, string _api_secret, Permissions perms  ){
+    void API::authenticate( string _api_key, string _api_secret, Permissions perms, string dirPath){
         api_key = _api_key;
         api_secret = _api_secret;
+        currentPerms = perms;
+        settingFilePath = dirPath + "authSetting.csv";
 
         // try to load from xml
         ofxXmlSettings xml;
-        bool bLoaded = xml.loadFile("flickr.xml");
+        bool bLoaded = xml.loadFile(settingFilePath);
 
         if ( bLoaded ){
             xml.pushTag("settings");{
@@ -269,26 +279,27 @@ namespace ofxFlickr {
                 }
             }; xml.popTag();
         }
-
-        // not loaded, definitely need to get one
-        if ( !bLoaded ) {
-            bAuthenticated = getAuthToken( perms );
-        } else {
-            // loaded, might not be valid! check to see if we need to load
-            if ( !checkAuthToken( api_key, auth_token, perms ) ){
-                bAuthenticated = getAuthToken( perms );
-            } else {
-                bAuthenticated = true;
+        
+        if (bLoaded) {
+            if (checkAuthToken(api_key, auth_token, perms)) {
+                state = AUTH_WAS_DONE;
+                return;
             }
         }
 
-        if ( bAuthenticated ) {
-            currentPerms = perms;
-        } else {
-            currentPerms = FLICKR_NONE;
-        }
-
-        return bAuthenticated;
+        xml.pushTag("settings"); {
+            frob = xml.getValue("frob", "");
+            if (frob != "") {
+                if (doAuth()) {
+                    saveToken(auth_token);
+                    state = AUTH_WAS_DONE;
+                    return;
+                }
+            }
+        } xml.popTag();
+        
+        showAuthPage(perms);
+        state = WAITING_AUTH;
     }
 
     //--------------------------------------------------------------
@@ -335,7 +346,7 @@ namespace ofxFlickr {
     }
 
     //--------------------------------------------------------------
-    bool API::getAuthToken( Permissions perms ){
+    void API::showAuthPage( Permissions perms ){
         // build call
         map<string,string> args;
         args["api_key"] = api_key;
@@ -349,6 +360,8 @@ namespace ofxFlickr {
             frob = xml.getValue("frob", "");
         }; xml.popTag();
 
+        saveFrob(frob);
+        
         // authenticate
 
         // %a = API key, %b = perms, %c = frob, %d = api_sig
@@ -375,7 +388,7 @@ namespace ofxFlickr {
         ofStringReplace(authURL, "%b", perm);
         ofStringReplace(authURL, "%c", frob);
         ofStringReplace(authURL, "%d", apiSig(toEncode));
-
+        
         // this part is weird! ofLaunchBrowser has a tiny bug
 #ifdef TARGET_OSX
 		string commandStr = "open '"+authURL +"'";
@@ -384,49 +397,6 @@ namespace ofxFlickr {
         cout << authURL;
         ofLaunchBrowser(authURL);
 #endif
-        bool bValidToken = false;
-        int  numSeconds  = 0;
-        int  secondsWait = 2;
-
-        for( numSeconds; numSeconds<30; numSeconds+=secondsWait ){
-            map<string,string> auth_args;
-            auth_args["api_key"]    = api_key;
-            auth_args["frob"]       = frob;
-
-            // get frob
-            string auth_result = makeAPICall( "flickr.auth.getToken", auth_args, FLICKR_XML, true );
-
-            xml.loadFromBuffer(auth_result);
-            xml.pushTag("rsp"); {
-                xml.pushTag("auth"); {
-                    auth_token = xml.getValue("token", "");
-                } xml.popTag();
-            } xml.popTag();
-
-            bValidToken = !( auth_token == "" );
-
-            if ( bValidToken ) break;
-            numSeconds += secondsWait;
-            ofSleepMillis(1000);
-        }
-//this is a workaround!
-        bValidToken = true;
-
-        if ( !bValidToken ){
-            ofLogError( "OAuth didn't succeed. Maybe you took too long?");
-            return false;
-        }
-
-        // save auth token to XML for safe keeping
-
-        ofxXmlSettings toSave;
-        toSave.addTag("settings");
-        toSave.pushTag("settings");{
-            toSave.addValue("token", auth_token);
-        }; toSave.popTag();
-        toSave.saveFile("flickr.xml");
-
-        return true;
     }
 
     //--------------------------------------------------------------
@@ -555,7 +525,7 @@ namespace ofxFlickr {
     
     //-------------------------------------------------------------
     string API::doUpload( string image ){        
-        if ( !bAuthenticated ){
+        if ( !wasAuthDone() ){
             ofLogWarning( "Not authenticated! Please call authenticate() with proper api key and secret" );
             return "";
         } else if ( currentPerms != FLICKR_WRITE ){
@@ -635,7 +605,7 @@ namespace ofxFlickr {
         vector<Media> toReturn;
         if ( query.api_key == "" ) query.api_key = api_key;
 
-        if ( query.requiresAuthentication() && !bAuthenticated ){
+        if ( query.requiresAuthentication() && !wasAuthDone() ){
             ofLogWarning("You must authenticate to use some of these parameters!");
             return toReturn;
         }
@@ -688,98 +658,164 @@ namespace ofxFlickr {
         return loadedMedia[id];
     }
     
+    bool API::doAuth(void) {
+
+        ofxXmlSettings xml;
+        map<string,string> auth_args;
+        auth_args["api_key"]    = api_key;
+        auth_args["frob"]       = frob;
+        
+        // get frob
+        string auth_result = makeAPICall( "flickr.auth.getToken", auth_args, FLICKR_XML, true );
+        
+        xml.loadFromBuffer(auth_result);
+        xml.pushTag("rsp"); {
+            xml.pushTag("auth"); {
+                auth_token = xml.getValue("token", "");
+            } xml.popTag();
+        } xml.popTag();
+        
+        return auth_token != "";
+    }
+    
+    void API::saveToken(string _token)
+    {
+        ofxXmlSettings toSave;
+        toSave.addTag("settings");
+        toSave.pushTag("settings");{
+            toSave.addValue("token", _token);
+        }; toSave.popTag();
+        toSave.saveFile(settingFilePath);
+    }
+    
+    void API::saveFrob(string _frob)
+    {
+        ofxXmlSettings toSave;
+        toSave.addTag("settings");
+        toSave.pushTag("settings");{
+            toSave.addValue("frob", _frob);
+        }; toSave.popTag();
+        toSave.saveFile(settingFilePath);
+    }
+    
     //-------------------------------------------------------------
     void API::threadedFunction(){
         while (isThreadRunning()){
-            // work through queue in order
-            if ( APIqueue.size() > 0 ){
-                lock();
-                APICall apiCall = APIqueue.front();
-                APIqueue.erase(APIqueue.begin());
-                unlock();
-                
-                string result   = "";
-                string path;
-                APIEvent args;
-                
-                switch (apiCall.type) {
-                    case FLICKR_GETMEDIA:
-                        path     = buildAPICall( apiCall.method, apiCall.args, apiCall.format, apiCall.bSigned );
-                        try
-                        {
-                            // Get REST style xml as string from flickr
-                            std::auto_ptr<std::istream> pStr(URIStreamOpener::defaultOpener().open( "https://" + api_base + path ));
-                            StreamCopier::copyToString(*pStr.get(), result);
+            
+            if (wasAuthDone()) {
+                // work through queue in order
+                if ( APIqueue.size() > 0 ){
+                    lock();
+                    APICall apiCall = APIqueue.front();
+                    APIqueue.erase(APIqueue.begin());
+                    unlock();
+                    
+                    string result   = "";
+                    string path;
+                    APIEvent args;
+                    
+                    switch (apiCall.type) {
+                        case FLICKR_GETMEDIA:
+                            path     = buildAPICall( apiCall.method, apiCall.args, apiCall.format, apiCall.bSigned );
+                            try
+                            {
+                                // Get REST style xml as string from flickr
+                                std::auto_ptr<std::istream> pStr(URIStreamOpener::defaultOpener().open( "https://" + api_base + path ));
+                                StreamCopier::copyToString(*pStr.get(), result);
+                                
+                                // get frob
+                                loadedMedia[apiCall.args["id"]] = Media();
+                                loadedMedia[apiCall.args["id"]].loadFromXML( result );
+                                args.results.push_back(loadedMedia[apiCall.args["id"]]);
+                                
+                                ofNotifyEvent(APIEvent::events, args);
+                            }
+                            catch (Exception &ex)
+                            {
+                                cerr << ex.displayText() << endl;
+                            }
+                            break;
+                        case FLICKR_SEARCH:
+                            path     = buildAPICall( apiCall.method, apiCall.args, apiCall.format, apiCall.bSigned );
                             
-                            // get frob
-                            loadedMedia[apiCall.args["id"]] = Media();
-                            loadedMedia[apiCall.args["id"]].loadFromXML( result );
-                            args.results.push_back(loadedMedia[apiCall.args["id"]]);
-                            
-                            ofNotifyEvent(APIEvent::events, args);
-                        }
-                        catch (Exception &ex)
-                        {
-                            cerr << ex.displayText() << endl;
-                        }
-                        break;
-                    case FLICKR_SEARCH:
-                        path     = buildAPICall( apiCall.method, apiCall.args, apiCall.format, apiCall.bSigned );
-                        
-                        try
-                        {
-                            // Get REST style xml as string from flickr
-                            std::auto_ptr<std::istream> pStr(URIStreamOpener::defaultOpener().open( "https://" + api_base + path ));
-                            StreamCopier::copyToString(*pStr.get(), result);
-                            
-                            ofxXmlSettings xml; xml.loadFromBuffer(result);
-                            xml.pushTag("rsp");{
-                                xml.pushTag("photos"); {
-                                    
-                                    for (int i=0; i<xml.getNumTags("photo"); i++){
-                                        Media med;
+                            try
+                            {
+                                // Get REST style xml as string from flickr
+                                std::auto_ptr<std::istream> pStr(URIStreamOpener::defaultOpener().open( "https://" + api_base + path ));
+                                StreamCopier::copyToString(*pStr.get(), result);
+                                
+                                ofxXmlSettings xml; xml.loadFromBuffer(result);
+                                xml.pushTag("rsp");{
+                                    xml.pushTag("photos"); {
                                         
-                                        med.id = xml.getAttribute("photo", "id", "", i);
-                                        med.farm = xml.getAttribute("photo", "farm", "", i);
-                                        med.secret = xml.getAttribute("photo", "secret", "", i);
-                                        med.server = xml.getAttribute("photo", "server", "", i);
-                                        med.originalsecret = xml.getAttribute("photo", "originalsecret", "", i);
-                                        med.originalformat = xml.getAttribute("photo", "originalformat", "", i);
-                                        
-                                        string t = xml.getAttribute("photo", "media", "", i);
-                                        if ( t == "photo"){
-                                            med.type = FLICKR_PHOTO;
-                                        } else if ( t == "video"){
-                                            med.type = FLICKR_VIDEO;
-                                        } else {
-                                            med.type = FLICKR_UNKNOWN;
+                                        for (int i=0; i<xml.getNumTags("photo"); i++){
+                                            Media med;
+                                            
+                                            med.id = xml.getAttribute("photo", "id", "", i);
+                                            med.farm = xml.getAttribute("photo", "farm", "", i);
+                                            med.secret = xml.getAttribute("photo", "secret", "", i);
+                                            med.server = xml.getAttribute("photo", "server", "", i);
+                                            med.originalsecret = xml.getAttribute("photo", "originalsecret", "", i);
+                                            med.originalformat = xml.getAttribute("photo", "originalformat", "", i);
+                                            
+                                            string t = xml.getAttribute("photo", "media", "", i);
+                                            if ( t == "photo"){
+                                                med.type = FLICKR_PHOTO;
+                                            } else if ( t == "video"){
+                                                med.type = FLICKR_VIDEO;
+                                            } else {
+                                                med.type = FLICKR_UNKNOWN;
+                                            }
+                                            
+                                            args.results.push_back(med);
                                         }
                                         
-                                        args.results.push_back(med);
-                                    }
-                                    
+                                    } xml.popTag();
                                 } xml.popTag();
-                            } xml.popTag();
+                                
+                                ofNotifyEvent(APIEvent::events, args);
+                            }
+                            catch (Exception &ex)
+                            {
+                                cerr << ex.displayText() << endl;
+                            }
+                            break;
+                        
+                        case FLICKR_UPLOAD:
+                            args.resultString = doUpload( apiCall.method );
                             
                             ofNotifyEvent(APIEvent::events, args);
+                            break;
+                            
+                        default:
+                            break;
+                    }
+                }
+                sleep(20);
+            } else {
+                switch (state) {
+                    case WAITING_AUTH:
+                    {
+                        if (!doAuth()) {
+                            if (authCharangedCount >= AUTH_CHARANGE_LIMIT) {
+                                ofLogError( "OAuth didn't succeed. Maybe you took too long?");
+                                state = FAIL_AUTH;
+                            } else {
+                                authCharangedCount++;
+                                ofSleepMillis(1000);
+                            }
+                            return;
+                        } else {
+                            // save auth token to XML for safe keeping
+                            saveToken(auth_token);
+                            state = AUTH_WAS_DONE;
+                            ofLogNotice("Auth was succeed!");
+
                         }
-                        catch (Exception &ex)
-                        {
-                            cerr << ex.displayText() << endl;
-                        }
-                        break;
-                    
-                    case FLICKR_UPLOAD:
-                        args.resultString = doUpload( apiCall.method );
-                        
-                        ofNotifyEvent(APIEvent::events, args);
-                        break;
-                        
-                    default:
+                    }
                         break;
                 }
             }
-            sleep(20);
         }
     }
 }

@@ -245,8 +245,8 @@ namespace ofxFlickr {
          * @param {std::string} api_secret
          * @param {ofxFlickr::Permissions} perms
          */
-        bool authenticate( string api_key, string api_secret, Permissions perms = FLICKR_WRITE );
-        
+        void authenticate( string api_key, string api_secret, Permissions perms = FLICKR_WRITE, string dirPath = "./" );
+
         /**
          * Check API token
          * @param {std::string} api_key
@@ -285,6 +285,12 @@ namespace ofxFlickr {
          */
         vector<Media> search( Query query );
         
+        /**
+         * Check that Auth was already done.
+         * @returns {bool} Was Auth Done?
+         */
+        bool wasAuthDone(void) { return state == AUTH_WAS_DONE; }
+        
     protected:
         
         vector <APICall> APIqueue;
@@ -292,12 +298,18 @@ namespace ofxFlickr {
         CallType methodToCallType( string method );
         
     private:
-        bool                bAuthenticated;
+        enum State {
+            BEFORE_AUTH,
+            WAITING_AUTH,
+            AUTH_WAS_DONE,
+            FAIL_AUTH,
+        };
+        
         Permissions         currentPerms;
         ofURLFileLoader     dummyLoader; // this is needed because OF doesn't have a way to say "hey, we already made an HTTPStreamFactory!"
         map<string, Media>  loadedMedia;
         
-        bool getAuthToken( Permissions perms );
+        void showAuthPage( Permissions perms );
         
         string apiSig( map<string, string> params );
         
@@ -307,6 +319,14 @@ namespace ofxFlickr {
         void makeAPICallThreaded( string method, map<string,string> args, Format format = FLICKR_XML, bool bSigned = false  );
         string buildAPICall( string method, map<string,string> args, Format format = FLICKR_XML, bool bSigned = false );
         string api_key, api_secret, frob, auth_token;
+        
+        bool doAuth(void);
+        void saveToken(string _token);
+        void saveFrob(string _frob);
+        
+        State state;
+        string settingFilePath;
+        unsigned int authCharangedCount;
     };
 
 }
