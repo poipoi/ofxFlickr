@@ -8,6 +8,8 @@
 
 #include "ofxFlickr.h"
 
+#define CONFIG_FILE_NAME    ("authSetting.csv")
+
 namespace ofxFlickr {
 
 #pragma mark ofxFlickr::Media
@@ -241,7 +243,7 @@ namespace ofxFlickr {
     currentPerms(FLICKR_NONE),
     state(BEFORE_AUTH),
     authCharangedCount(0),
-    settingFilePath("./")
+    settingFilePath(CONFIG_FILE_NAME)
     {
 
     };
@@ -265,7 +267,7 @@ namespace ofxFlickr {
         api_key = _api_key;
         api_secret = _api_secret;
         currentPerms = perms;
-        settingFilePath = dirPath + "authSetting.csv";
+        settingFilePath = dirPath + CONFIG_FILE_NAME;
 
         // try to load from xml
         ofxXmlSettings xml;
